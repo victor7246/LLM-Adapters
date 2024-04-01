@@ -16,6 +16,7 @@ import bitsandbytes as bnb
 sys.path.append(os.path.join(os.getcwd(), "peft/src/"))
 from peft import (  # noqa: E402
     LoraConfig,
+    SparseFTConfig,
     BottleneckConfig,
     PrefixTuningConfig,
     get_peft_model,
@@ -23,8 +24,13 @@ from peft import (  # noqa: E402
     prepare_model_for_int8_training,
     set_peft_model_state_dict,
 )
-from transformers import AutoModelForCausalLM, AutoTokenizer, LlamaTokenizer, AutoModel  # noqa: F402
+from transformers import AutoModelForCausalLM, AutoTokenizer, LlamaTokenizer, AutoModel, AutoConfig  # noqa: F402
 
+class AttributeDict(dict):
+    def __getattr__(self, attr):
+        return self[attr]
+    def __setattr__(self, attr, value):
+        self[attr] = value
 
 def train(
         # model/data params
@@ -58,6 +64,11 @@ def train(
         scaling: Union[float, str] = 1.0,
         # prefix tuning hyperparams
         num_virtual_tokens: int = 30,
+        # sparseft hyperparams
+        sparseft_module = "",
+        sparseft_type = 2,
+        budget = 1000000,
+        recovery_steps = 0,
         # llm hyperparams
         train_on_inputs: bool = True,  # if False, masks out inputs in loss
         group_by_length: bool = False,  # faster, but produces an odd training loss curve
@@ -140,6 +151,25 @@ def train(
             device_map={"": int(os.environ.get("LOCAL_RANK") or 0)},
             trust_remote_code=True,
         )
+    '''
+    elif adapter_name == 'sparseft':
+        config = AutoConfig.from_pretrained(
+        base_model,
+        sparseft_module=sparseft_module, 
+        sparseft_type=sparseft_type, 
+        budget=budget,
+        apply_sparseft=True
+        )
+        
+        model = AutoModelForCausalLM.from_pretrained(
+            base_model,
+            config=config,
+            load_in_8bit=True,
+            torch_dtype=torch.float16,
+            device_map={"": int(os.environ.get("LOCAL_RANK") or 0)},
+            trust_remote_code=True,
+        )
+    '''
 
     if model.config.model_type == "llama":
         # Due to the name of transformers' LlamaTokenizer, we have to do this
@@ -193,8 +223,8 @@ def train(
                                                                     ]  # could be sped up, probably
         return tokenized_full_prompt
 
-    model = prepare_model_for_int8_training(model, use_gradient_checkpointing=use_gradient_checkpointing)
     if adapter_name == "lora":
+        model = prepare_model_for_int8_training(model, use_gradient_checkpointing=use_gradient_checkpointing)
         config = LoraConfig(
             r=lora_r,
             lora_alpha=lora_alpha,
@@ -203,7 +233,9 @@ def train(
             bias="none",
             task_type="CAUSAL_LM",
         )
+        model = get_peft_model(model, config)
     elif adapter_name == "bottleneck":
+        model = prepare_model_for_int8_training(model, use_gradient_checkpointing=use_gradient_checkpointing)
         config = BottleneckConfig(
             bottleneck_size=bottleneck_size,
             non_linearity=non_linearity,
@@ -215,15 +247,32 @@ def train(
             bias="none",
             task_type="CAUSAL_LM",
         )
+        model = get_peft_model(model, config)
     elif adapter_name == "prefix-tuning":
+        model = prepare_model_for_int8_training(model, use_gradient_checkpointing=use_gradient_checkpointing)
         config = PrefixTuningConfig(
             num_virtual_tokens=num_virtual_tokens,
             task_type="CAUSAL_LM",
         )
-    model = get_peft_model(model, config)
-    if adapter_name == "prefix-tuning":
-        model.to('cuda')
+        model = get_peft_model(model, config)
+        if adapter_name == "prefix-tuning":
+            model.to('cuda')    
+    
+    elif adapter_name == 'sparseft':
+        model = prepare_model_for_int8_training(model, use_gradient_checkpointing=use_gradient_checkpointing)
+        config = SparseFTConfig(
+            sparseft_type=sparseft_type,
+            target_modules=target_modules,
+            bias="none",
+            task_type="CAUSAL_LM",
+        )
+        model = get_peft_model(model, config)
 
+    model_args = AttributeDict({'target_modules': target_modules, \
+        'sparseft_type' : sparseft_type, \
+        'budget' : budget, \
+        'apply_sparseft': adapter_name == 'sparseft'})
+    
     if data_path.endswith(".json"):  # todo: support jsonl
         data = load_dataset("json", data_files=data_path)
     else:
@@ -292,13 +341,16 @@ def train(
             load_best_model_at_end=True if val_set_size > 0 else False,
             ddp_find_unused_parameters=False if ddp else None,
             group_by_length=group_by_length,
-            report_to="wandb" if use_wandb else None,
-            run_name=wandb_run_name if use_wandb else None,
+            report_to=None, #"wandb" if use_wandb else None,
+            run_name=None, #wandb_run_name if use_wandb else None,
+            recovery_steps=recovery_steps,
         ),
+        model_args=model_args,
         data_collator=transformers.DataCollatorForSeq2Seq(
             tokenizer, pad_to_multiple_of=8, return_tensors="pt", padding=True
         ),
     )
+
     model.config.use_cache = False
 
     old_state_dict = model.state_dict
