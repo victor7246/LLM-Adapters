@@ -1,4 +1,5 @@
 import os
+os.environ["WANDB_DISABLED"] = "true"
 import sys
 from typing import List
 

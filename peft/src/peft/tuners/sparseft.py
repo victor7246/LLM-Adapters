@@ -253,12 +253,14 @@ class Linear(nn.Linear):
             # self.lora_B_bias = nn.Parameter(
             #     self.weight.new_zeros((out_features))
             # )
-            self.a_delta_weight = nn.Parameter(
-                self.weight.new_zeros((out_features, r))
-            )
-            self.b_delta_weight = nn.Parameter(
-                self.weight.new_zeros((r, in_features))
-            )
+            #self.a_delta_weight = nn.Parameter(
+            #    self.weight.new_zeros((out_features, r))
+            #)
+            #self.b_delta_weight = nn.Parameter(
+            #    self.weight.new_zeros((r, in_features))
+            #)
+            self.a_delta_weight = nn.Linear(in_features, r, bias=False)
+            self.b_delta_weight = nn.Linear(r, out_features, bias=False)
 
         else:
             raise NotImplementedError
@@ -283,8 +285,11 @@ class Linear(nn.Linear):
             if hasattr(self, 'a_delta_weight'):
                 # nn.init.normal_(self.lora_A_weight)
                 # nn.init.normal_(self.lora_B_weight)
-                nn.init.zeros_(self.a_delta_weight)
-                nn.init.zeros_(self.b_delta_weight)
+                #nn.init.zeros_(self.a_delta_weight)
+                #nn.init.zeros_(self.b_delta_weight)
+                #nn.init.zeros_(self.a_delta_weight.weight)
+                nn.init.zeros_(self.b_delta_weight.weight)
+                nn.init.kaiming_uniform_(self.a_delta_weight.weight, a=math.sqrt(5))
         else:
             raise NotImplementedError
         
@@ -313,8 +318,11 @@ class Linear(nn.Linear):
         elif (self.sparseft_type == 2):
             # res = F.linear(x, T(self.lora_A_weight))
             # res = F.linear(res, T(self.lora_B_weight))
-            res = F.linear(x, T(self.a_delta_weight @ self.b_delta_weight))
-            result += res
+            #res = F.linear(x, T(self.a_delta_weight @ self.b_delta_weight))
+            #result += res
+            result = F.linear(x, transpose(self.weight, self.fan_in_fan_out), bias=self.bias)
+            result += self.b_delta_weight(self.a_delta_weight(x.to(self.a_delta_weight.weight.dtype)))
+
         else:
             raise NotImplementedError
         return result
@@ -381,12 +389,14 @@ if is_bnb_available():
                 #self.delta_weight = nn.Parameter(
                 #    self.weight.new_zeros((out_features, in_features))
                 #)
-                self.a_delta_weight = nn.Parameter(
-                    self.weight.new_zeros((out_features, r))
-                )
-                self.b_delta_weight = nn.Parameter(
-                    self.weight.new_zeros((r, in_features))
-                )
+                #self.a_delta_weight = nn.Parameter(
+                #    self.weight.new_zeros((out_features, r))
+                #)
+                #self.b_delta_weight = nn.Parameter(
+                #    self.weight.new_zeros((r, in_features))
+                #)
+                self.a_delta_weight = nn.Linear(in_features, r, bias=False)
+                self.b_delta_weight = nn.Linear(r, out_features, bias=False)
             else:
                 raise NotImplementedError
 
@@ -408,8 +418,12 @@ if is_bnb_available():
                     # nn.init.normal_(self.lora_A_weight)
                     # nn.init.normal_(self.lora_B_weight)
                     #nn.init.zeros_(self.delta_weight)
-                    nn.init.zeros_(self.a_delta_weight)
-                    nn.init.zeros_(self.b_delta_weight)
+                    #nn.init.zeros_(self.a_delta_weight)
+                    #nn.init.zeros_(self.b_delta_weight)
+                    #nn.init.zeros_(self.a_delta_weight.weight)
+                    nn.init.zeros_(self.b_delta_weight.weight)
+                    nn.init.kaiming_uniform_(self.a_delta_weight.weight, a=math.sqrt(5))
+                    
             else:
                 raise NotImplementedError
 
@@ -441,13 +455,18 @@ if is_bnb_available():
                     if x.dtype != torch.float32:
                         x = x.float()
 
+                    #result = F.linear(x, transpose(self.weight, self.fan_in_fan_out), bias=self.bias).to(expected_dtype)
+                    result += self.b_delta_weight(self.a_delta_weight(x.to(self.a_delta_weight.weight.dtype))).to(expected_dtype)                    
+
                     # res = F.linear(x, T(self.lora_A_weight))
                     # res = F.linear(res, T(self.lora_B_weight))
-                    res = F.linear(x, T(self.a_delta_weight @ self.b_delta_weight)).to(expected_dtype)
-                    result += res
+                    #res = F.linear(x, T(self.a_delta_weight @ self.b_delta_weight)).to(expected_dtype)
+                    #result += res
                 else:
-                    res = F.linear(x, T(self.a_delta_weight @ self.b_delta_weight))
-                    result += res
+                    #res = F.linear(x, T(self.a_delta_weight @ self.b_delta_weight))
+                    #result += res
+                    #result = F.linear(x, transpose(self.weight, self.fan_in_fan_out), bias=self.bias)
+                    result += self.b_delta_weight(self.a_delta_weight(x.to(self.a_delta_weight.weight.dtype)))
             else:
                 raise NotImplementedError
             return result

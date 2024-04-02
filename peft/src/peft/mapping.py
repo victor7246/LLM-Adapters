@@ -20,7 +20,7 @@ from .peft_model import (
     PeftModelForSequenceClassification,
     PeftModelForTokenClassification,
 )
-from .tuners import LoraConfig, PrefixTuningConfig, PromptEncoderConfig, PromptTuningConfig, BottleneckConfig
+from .tuners import LoraConfig, PrefixTuningConfig, PromptEncoderConfig, PromptTuningConfig, BottleneckConfig, SparseFTConfig
 from .utils import PromptLearningConfig
 
 
@@ -36,6 +36,7 @@ PEFT_TYPE_TO_CONFIG_MAPPING = {
     "PREFIX_TUNING": PrefixTuningConfig,
     "P_TUNING": PromptEncoderConfig,
     "LORA": LoraConfig,
+    "SPARSEFT": SparseFTConfig,
     "BOTTLENECK": BottleneckConfig,
 }
 
@@ -192,11 +193,15 @@ def get_peft_model(model, peft_config):
         elif peft_config.peft_type == "BOTTLENECK":
             peft_config = _prepare_bottleneck_config(peft_config, model_config)
             return PeftModel(model, peft_config)
+        elif peft_config.peft_type == "SPARSEFT":
+            return PeftModel(model, peft_config)
     if not isinstance(peft_config, PromptLearningConfig):
         if peft_config.peft_type == "BOTTLENECK":
             peft_config = _prepare_bottleneck_config(peft_config, model_config)
         elif peft_config.peft_type == "LORA":
             peft_config = _prepare_lora_config(peft_config, model_config)
+        elif peft_config.peft_type == "SPARSEFT":
+            return PeftModel(model, peft_config)
     else:
         peft_config = _prepare_prompt_learning_config(peft_config, model_config)
     return MODEL_TYPE_TO_PEFT_MODEL_MAPPING[peft_config.task_type](model, peft_config)

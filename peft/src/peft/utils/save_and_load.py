@@ -48,6 +48,15 @@ def get_peft_model_state_dict(model, state_dict=None):
                         to_return[bias_name] = state_dict[bias_name]
         else:
             raise NotImplementedError
+    elif model.peft_config.peft_type == PeftType.SPARSEFT:
+        # to_return = lora_state_dict(model, bias=model.peft_config.bias)
+        # adapted from `https://github.com/microsoft/LoRA/blob/main/loralib/utils.py`
+        # to directly with the state dict which is necessary when using DeepSpeed or FSDP
+        bias = model.peft_config.bias
+        if bias == "none":
+            to_return = {k: state_dict[k] for k in state_dict if "delta_weight" in k}
+        else:
+            raise NotImplementedError
     elif model.peft_config.peft_type == PeftType.BOTTLENECK:
         # return the state dict of the model with Bottleneck adapters
         bias = model.peft_config.bias
@@ -89,7 +98,7 @@ def set_peft_model_state_dict(model, peft_model_state_dict):
     """
 
     model.load_state_dict(peft_model_state_dict, strict=False)
-    if model.peft_config.peft_type != PeftType.LORA and model.peft_config.peft_type != PeftType.BOTTLENECK:
+    if model.peft_config.peft_type != PeftType.LORA and model.peft_config.peft_type != PeftType.BOTTLENECK and model.peft_config.peft_type != PeftType.SPARSEFT:
         model.prompt_encoder.embedding.load_state_dict(
             {"weight": peft_model_state_dict["prompt_embeddings"]}, strict=True
         )
