@@ -48,6 +48,7 @@ class SparseFTConfig(PeftConfig):
         enable_lora ( `List[bool]`): Used with `lora.MergedLinear`.
         bias (`str`): Bias type for Lora. Can be 'none', 'all' or 'lora_only'
     """
+    r: int = field(default=8, metadata={"help": "Lora attention dimension"})
     sparseft_type: int = field(default=2, metadata={"help": "Type of SparseFT"})
     target_modules: Optional[Union[List[str], str]] = field(
         default=None,
@@ -132,10 +133,10 @@ class SparseFTModel(torch.nn.Module):
                             "index": target.index,
                         }
                     )
-                    new_module = Linear8bitLt(target.in_features, target.out_features, bias=bias, **kwargs)
+                    new_module = Linear8bitLt(target.in_features, target.out_features, r=self.peft_config.r, bias=bias, **kwargs)
 
                 elif isinstance(target, torch.nn.Linear):
-                    new_module = Linear(target.in_features, target.out_features, bias=bias, **kwargs)
+                    new_module = Linear(target.in_features, target.out_features, r=self.peft_config.r, bias=bias, **kwargs)
                 self._replace_module(parent, target_name, new_module, target)
         if not is_target_modules_in_base_model:
             raise ValueError(
@@ -210,12 +211,14 @@ class Linear(nn.Linear):
         self, 
         in_features: int, 
         out_features: int, 
+        r: int,
         sparseft_type : int = 0,
         fan_in_fan_out : bool = False, 
         **kwargs
     ):
         self.sparseft_type = sparseft_type
         self.fan_in_fan_out = fan_in_fan_out
+        self.r = r
         
         nn.Linear.__init__(self, in_features, out_features, **kwargs)
         
@@ -250,9 +253,13 @@ class Linear(nn.Linear):
             # self.lora_B_bias = nn.Parameter(
             #     self.weight.new_zeros((out_features))
             # )
-            self.delta_weight = nn.Parameter(
-                self.weight.new_zeros((out_features, in_features))
+            self.a_delta_weight = nn.Parameter(
+                self.weight.new_zeros((out_features, r))
             )
+            self.b_delta_weight = nn.Parameter(
+                self.weight.new_zeros((r, in_features))
+            )
+
         else:
             raise NotImplementedError
         
@@ -273,10 +280,11 @@ class Linear(nn.Linear):
                 nn.init.constant_(self.mask_weight, 1.0)
                 nn.init.zeros_(self.delta_weight)
         elif (self.sparseft_type == 2):
-            if hasattr(self, 'delta_weight'):
+            if hasattr(self, 'a_delta_weight'):
                 # nn.init.normal_(self.lora_A_weight)
                 # nn.init.normal_(self.lora_B_weight)
-                nn.init.zeros_(self.delta_weight)
+                nn.init.zeros_(self.a_delta_weight)
+                nn.init.zeros_(self.b_delta_weight)
         else:
             raise NotImplementedError
         
@@ -305,7 +313,7 @@ class Linear(nn.Linear):
         elif (self.sparseft_type == 2):
             # res = F.linear(x, T(self.lora_A_weight))
             # res = F.linear(res, T(self.lora_B_weight))
-            res = F.linear(x, T(self.delta_weight))
+            res = F.linear(x, T(self.a_delta_weight @ self.b_delta_weight))
             result += res
         else:
             raise NotImplementedError
@@ -319,13 +327,15 @@ if is_bnb_available():
             self, 
             in_features: int, 
             out_features: int, 
+            r: int,
             sparseft_type : int = 0,
             fan_in_fan_out : bool = False, 
             **kwargs
         ):
             self.sparseft_type = sparseft_type
             self.fan_in_fan_out = fan_in_fan_out
-            
+            self.r = r
+
             bnb.nn.Linear8bitLt.__init__(
                 self,
                 in_features,
@@ -368,8 +378,14 @@ if is_bnb_available():
                 # self.lora_B_bias = nn.Parameter(
                 #     self.weight.new_zeros((out_features))
                 # )
-                self.delta_weight = nn.Parameter(
-                    self.weight.new_zeros((out_features, in_features))
+                #self.delta_weight = nn.Parameter(
+                #    self.weight.new_zeros((out_features, in_features))
+                #)
+                self.a_delta_weight = nn.Parameter(
+                    self.weight.new_zeros((out_features, r))
+                )
+                self.b_delta_weight = nn.Parameter(
+                    self.weight.new_zeros((r, in_features))
                 )
             else:
                 raise NotImplementedError
@@ -388,30 +404,14 @@ if is_bnb_available():
                     nn.init.constant_(self.mask_weight, 1.0)
                     nn.init.zeros_(self.delta_weight)
             elif (self.sparseft_type == 2):
-                if hasattr(self, 'delta_weight'):
+                if hasattr(self, 'a_delta_weight'):
                     # nn.init.normal_(self.lora_A_weight)
                     # nn.init.normal_(self.lora_B_weight)
-                    nn.init.zeros_(self.delta_weight)
+                    #nn.init.zeros_(self.delta_weight)
+                    nn.init.zeros_(self.a_delta_weight)
+                    nn.init.zeros_(self.b_delta_weight)
             else:
                 raise NotImplementedError
-
-        def forward(self, x: torch.Tensor):
-            result = super().forward(x)
-
-            if self.disable_adapters:
-                return result
-            elif self.r > 0:
-                if not torch.is_autocast_enabled():
-                    expected_dtype = result.dtype
-
-                    if x.dtype != torch.float32:
-                        x = x.float()
-                    output = self.lora_B(self.lora_A(self.lora_dropout(x))).to(expected_dtype) * self.scaling
-                    result += output
-                else:
-                    output = self.lora_B(self.lora_A(self.lora_dropout(x))) * self.scaling
-                    result += output
-            return result
 
         def forward(self, x: torch.Tensor):
             def T(w):
@@ -443,10 +443,10 @@ if is_bnb_available():
 
                     # res = F.linear(x, T(self.lora_A_weight))
                     # res = F.linear(res, T(self.lora_B_weight))
-                    res = F.linear(x, T(self.delta_weight)).to(expected_dtype)
+                    res = F.linear(x, T(self.a_delta_weight @ self.b_delta_weight)).to(expected_dtype)
                     result += res
                 else:
-                    res = F.linear(x, T(self.delta_weight))
+                    res = F.linear(x, T(self.a_delta_weight @ self.b_delta_weight))
                     result += res
             else:
                 raise NotImplementedError

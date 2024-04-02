@@ -261,6 +261,7 @@ def train(
     elif adapter_name == 'sparseft':
         model = prepare_model_for_int8_training(model, use_gradient_checkpointing=use_gradient_checkpointing)
         config = SparseFTConfig(
+            r=lora_r,
             sparseft_type=sparseft_type,
             target_modules=target_modules,
             bias="none",
